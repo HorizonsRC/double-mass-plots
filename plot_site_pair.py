@@ -30,6 +30,7 @@ excluded_sites = [
     "Ohau at Haines Ford",
     "Waihi at S.H.52",
     "Waikawa at North Manakau Road",
+    "Wainui at Weber Intersection",
 ]
 
 
@@ -39,30 +40,64 @@ def monthly_sum(df):
     return monthly.iloc[1:-1]  # exclude partial months
 
 
-def plot_site_supplement_pairs(main_site: str):
+def plot_site_supplement_pairs(main_site: str, filter_quality=400):
     """Give plots and correlation values for rainfall."""
 
     base_save_dir = f"./output/{main_site}/"
     os.makedirs(base_save_dir, exist_ok=True)
     supplementary_sites = find_r_rain(main_site)
-    all_sites = [main_site] + supplementary_sites
 
     monthly_data = []
-    for site in all_sites:
+    for site in [main_site] + supplementary_sites:
         print(f"Obtaining {site} data for comparison to {main_site}")
         data = ht.get_data(site, measurement, from_date=None, to_date=None).set_index(
             ["Time"]
         )
+        if filter_quality:
+            qc_series = (
+                ht.get_data(
+                    site,
+                    measurement,
+                    from_date=None,
+                    to_date=None,
+                    tstype="Quality",
+                )
+                .set_index(["Time"])
+                .Value
+            )
+            worst_qc_this_month = qc_series.copy()
+            worst_qc_this_month.index = worst_qc_this_month.index.map(
+                lambda x: pd.Timestamp(year=x.year, month=x.month, day=1)
+            )
+            worst_qc_this_month = worst_qc_this_month.groupby(
+                worst_qc_this_month.index
+            ).min()
+
+            monthly_qc = pd.concat(
+                [
+                    worst_qc_this_month.reindex(data.Value.index, fill_value=1000),
+                    qc_series.reindex(data.Value.index, method="ffill"),
+                ],
+                axis=1,
+            ).min(axis=1)
+
+            data = data[monthly_qc > filter_quality]
+
         if not data.empty:
             monthly_data.append(monthly_sum(data.Value.rename(site)))
+        elif site == main_site:
+            print("")
+            print(f"No valid data for main site {site}")
+            print("")
+            return {site: {}}, {site: {}}
         else:
-            raise ValueError(f"No data at Site: {site}, supplement of {main_site}")
+            supplementary_sites.remove(site)
+
     combined_df = pd.concat(monthly_data, axis=1).sort_index()
 
     correlations = combined_df.corr()
 
     for site in supplementary_sites:
-        print(f"Calculating correlation for {main_site} & {site}")
         plt.figure()
         plt.scatter(combined_df[main_site], combined_df[site])
         plt.title(
@@ -73,7 +108,6 @@ def plot_site_supplement_pairs(main_site: str):
 
     scale_dict = {}
     for site in supplementary_sites:
-        print(f"Plotting double mass for {main_site} & {site}")
         cumulative_df = combined_df[
             ~combined_df[main_site].isnull() & ~combined_df[site].isnull()
         ].cumsum()
@@ -201,7 +235,7 @@ if __name__ == "__main__":
         scales[s] = scale
         correlations[s] = correlation
     os.makedirs(main_save_dir, exist_ok=True)
-    with open(main_save_dir + "correlation_values.txt", "w") as file:
+    with open(main_save_dir + "correlation_values.json", "w") as file:
         file.write(json.dumps(correlations))
-    with open(main_save_dir + "scale_values.txt", "w") as file:
+    with open(main_save_dir + "scale_values.json", "w") as file:
         file.write(json.dumps(scales))

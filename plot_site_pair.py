@@ -1,3 +1,5 @@
+from contextlib import suppress
+
 from hilltoppy import Hilltop
 import pandas as pd
 from sklearn.linear_model import LinearRegression
@@ -33,6 +35,12 @@ excluded_sites = [
     "Wainui at Weber Intersection",
 ]
 
+backup_measurements = [
+    "Rainfall [SCADA Rainfall]",
+    "Rainfall (backup) [SCADA Rainfall (backup)]",
+    "Rainfall (backup) [Rainfall (backup sensors)]",
+]
+
 
 def monthly_sum(df):
     """Give monthly sums."""
@@ -40,7 +48,7 @@ def monthly_sum(df):
     return monthly.iloc[1:-1]  # exclude partial months
 
 
-def plot_site_supplement_pairs(main_site: str, filter_quality=400):
+def plot_site_supplement_pairs(main_site: str, filter_quality: int | None = 400):
     """Give plots and correlation values for rainfall."""
 
     base_save_dir = f"./output/{main_site}/"
@@ -48,40 +56,66 @@ def plot_site_supplement_pairs(main_site: str, filter_quality=400):
     supplementary_sites = find_r_rain(main_site)
 
     monthly_data = []
+    sites_using_backup = []
     for site in [main_site] + supplementary_sites:
         print(f"Obtaining {site} data for comparison to {main_site}")
-        data = ht.get_data(site, measurement, from_date=None, to_date=None).set_index(
-            ["Time"]
-        )
-        if filter_quality:
-            qc_series = (
-                ht.get_data(
+        try:
+            data = ht.get_data(
+                site, measurement, from_date=None, to_date=None
+            ).set_index(["Time"])
+        except ValueError:
+            # This catches missing sites
+            # a missing measurement returns an empty df, so we do that
+            data = pd.DataFrame()
+
+        # check if we need to try for a backup datasource
+        if data.empty:
+            for meas in backup_measurements:
+                if meas == "Rainfall (backup) [SCADA Rainfall (backup)]":
+                    pass
+                if site not in sites_using_backup:
+                    with suppress(ValueError):
+                        data = ht.get_data(
+                            site, meas, from_date=None, to_date=None
+                        ).set_index(["Time"])
+                    if not data.empty:
+                        sites_using_backup.append(site)
+
+        if filter_quality and site not in sites_using_backup:
+            try:
+                qc_data = ht.get_data(
                     site,
                     measurement,
                     from_date=None,
                     to_date=None,
                     tstype="Quality",
-                )
-                .set_index(["Time"])
-                .Value
-            )
-            worst_qc_this_month = qc_series.copy()
-            worst_qc_this_month.index = worst_qc_this_month.index.map(
-                lambda x: pd.Timestamp(year=x.year, month=x.month, day=1)
-            )
-            worst_qc_this_month = worst_qc_this_month.groupby(
-                worst_qc_this_month.index
-            ).min()
+                ).set_index(["Time"])
+                if qc_data.empty:
+                    data = pd.Series()
+                else:
+                    qc_series = qc_data.Value
 
-            monthly_qc = pd.concat(
-                [
-                    worst_qc_this_month.reindex(data.Value.index, fill_value=1000),
-                    qc_series.reindex(data.Value.index, method="ffill"),
-                ],
-                axis=1,
-            ).min(axis=1)
+                    worst_qc_this_month = qc_series.copy()
+                    worst_qc_this_month.index = worst_qc_this_month.index.map(
+                        lambda x: pd.Timestamp(year=x.year, month=x.month, day=1)
+                    )
+                    worst_qc_this_month = worst_qc_this_month.groupby(
+                        worst_qc_this_month.index
+                    ).min()
 
-            data = data[monthly_qc > filter_quality]
+                    monthly_qc = pd.concat(
+                        [
+                            worst_qc_this_month.reindex(
+                                data.Value.index, fill_value=1000
+                            ),
+                            qc_series.reindex(data.Value.index, method="ffill"),
+                        ],
+                        axis=1,
+                    ).min(axis=1)
+
+                    data = data[monthly_qc > filter_quality]
+            except ValueError:
+                data = pd.Series()
 
         if not data.empty:
             monthly_data.append(monthly_sum(data.Value.rename(site)))
@@ -89,19 +123,32 @@ def plot_site_supplement_pairs(main_site: str, filter_quality=400):
             print("")
             print(f"No valid data for main site {site}")
             print("")
-            return {site: {}}, {site: {}}
+            return {site: {}}, {site: {}}, {site: {}}
         else:
             supplementary_sites.remove(site)
 
     combined_df = pd.concat(monthly_data, axis=1).sort_index()
 
-    correlations = combined_df.corr()
+    correlation_matrix = combined_df.corr()
+
+    def title_sites_str(site1, site2):
+        backup1 = site1 in sites_using_backup
+        if backup1:
+            backup1 = "BACKUP " + site1
+        else:
+            backup1 = site1
+        backup2 = site2 in sites_using_backup
+        if backup2:
+            backup2 = "BACKUP " + site2
+        else:
+            backup2 = site2
+        return backup1 + " vs " + backup2
 
     for site in supplementary_sites:
         plt.figure()
         plt.scatter(combined_df[main_site], combined_df[site])
         plt.title(
-            f"Monthly rain {main_site} vs {site}, PCC={correlations.loc[main_site, site]}"
+            f"R2 {title_sites_str(main_site,site)}, PCC={correlation_matrix.loc[main_site, site]}"
         )
         plt.savefig(base_save_dir + f"{main_site}_correlation_{site}.png", format="png")
         plt.close()
@@ -111,27 +158,34 @@ def plot_site_supplement_pairs(main_site: str, filter_quality=400):
         cumulative_df = combined_df[
             ~combined_df[main_site].isnull() & ~combined_df[site].isnull()
         ].cumsum()
-        regression = LinearRegression(fit_intercept=False).fit(
-            cumulative_df[main_site].values.reshape(-1, 1),
-            cumulative_df[site].values.reshape(-1, 1),
-        )
-        scale_dict[site] = float(regression.coef_[0][0])
-        plt.figure()
-        plt.scatter(cumulative_df[main_site], cumulative_df[site])
-        max_value = max(cumulative_df[main_site][~cumulative_df[main_site].isnull()])
-        plt.plot(
-            np.array([0, max_value]).reshape(-1, 1),
-            regression.predict(np.array([0, max_value]).reshape(-1, 1)),
-            color="k",
-        )
-        plt.title(
-            f"Double mass rain {main_site} vs {site}, Scale={float(regression.coef_[0][0])}"
-        )
-        plt.savefig(base_save_dir + f"{main_site}_fit_{site}.png", format="png")
-        plt.close()
+        if (not cumulative_df[main_site].empty) and (not cumulative_df[site].empty):
+            regression = LinearRegression(fit_intercept=False).fit(
+                cumulative_df[main_site].values.reshape(-1, 1),
+                cumulative_df[site].values.reshape(-1, 1),
+            )
+            scale_dict[site] = float(regression.coef_[0][0])
+            plt.figure()
+            plt.scatter(cumulative_df[main_site], cumulative_df[site])
+            max_value = max(
+                cumulative_df[main_site][~cumulative_df[main_site].isnull()]
+            )
+            plt.plot(
+                np.array([0, max_value]).reshape(-1, 1),
+                regression.predict(np.array([0, max_value]).reshape(-1, 1)),
+                color="k",
+            )
+            plt.title(
+                f"DMP {title_sites_str(main_site,site)}, Scale={float(regression.coef_[0][0])}"
+            )
+            plt.savefig(base_save_dir + f"{main_site}_fit_{site}.png", format="png")
+            plt.close()
 
     # plt.show()
-    return dict(correlations.loc[main_site].drop(main_site)), scale_dict
+    return (
+        dict(correlation_matrix.loc[main_site].drop(main_site)),
+        scale_dict,
+        sites_using_backup,
+    )
 
 
 def sql_server_url():
@@ -173,11 +227,7 @@ def find_r_rain(site):
 
     xml_string = result.loc[0, "SiteInfo"]
     xml_dict = xmltodict.parse(xml_string)["SiteInfo"]
-    return [
-        s
-        for s in [i.strip() for i in xml_dict["R_Rain"].split(",")]
-        if ((len(s) > 0) and (s not in excluded_sites))
-    ]
+    return [x for x in [i.strip() for i in xml_dict["R_Rain"].split(",")] if len(x) > 0]
 
 
 def get_site_list():
@@ -204,12 +254,12 @@ def get_site_list():
 
     site_list = list(result.SiteName)
 
-    return sorted([s for s in site_list if s not in excluded_sites])
+    return sorted(site_list)
 
 
 def find_empty_sites():
     backup_only_sites = []
-    for site in sorted(get_site_list())[9:]:
+    for site in sorted(get_site_list()):
         print(site)
         try:
             data = ht.get_data(site, measurement, from_date=None, to_date=None)
@@ -217,7 +267,7 @@ def find_empty_sites():
                 backup_only_sites.append(site)
                 print("MISSING")
                 print(backup_only_sites)
-        except:
+        except ValueError:
             backup_only_sites.append(site)
             print("FAILED")
             print(backup_only_sites)
@@ -230,12 +280,16 @@ if __name__ == "__main__":
     main_save_dir = f"./output/aa_stats/"
     scales = {}
     correlations = {}
+    backups = {}
     for s in get_site_list():
-        correlation, scale = plot_site_supplement_pairs(s)
+        correlation, scale, backup = plot_site_supplement_pairs(s, filter_quality=None)
         scales[s] = scale
         correlations[s] = correlation
+        backups[s] = backup
     os.makedirs(main_save_dir, exist_ok=True)
     with open(main_save_dir + "correlation_values.json", "w") as file:
         file.write(json.dumps(correlations))
     with open(main_save_dir + "scale_values.json", "w") as file:
         file.write(json.dumps(scales))
+    with open(main_save_dir + "backup_sites.json", "w") as file:
+        file.write(json.dumps(backups))

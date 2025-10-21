@@ -48,6 +48,65 @@ def monthly_sum(df):
     return monthly.iloc[1:-1]  # exclude partial months
 
 
+def generate_site_data(site: str, filter_quality: int | None):
+    """Generates double mass plot and linear fit for a site and a comparison."""
+    site_uses_backup = False
+    try:
+        data = ht.get_data(site, measurement, from_date=None, to_date=None).set_index(
+            ["Time"]
+        )
+    except ValueError:
+        # This catches missing sites
+        # a missing measurement returns an empty df, so we do that
+        data = pd.DataFrame()
+
+    # check if we need to try for a backup datasource
+    if data.empty:
+        for meas in backup_measurements:
+            with suppress(ValueError):
+                data = ht.get_data(site, meas, from_date=None, to_date=None).set_index(
+                    ["Time"]
+                )
+            if not data.empty:
+                site_uses_backup = True
+
+    if filter_quality:
+        try:
+            qc_data = ht.get_data(
+                site,
+                measurement,
+                from_date=None,
+                to_date=None,
+                tstype="Quality",
+            ).set_index(["Time"])
+            if qc_data.empty:
+                data = pd.Series()
+            else:
+                qc_series = qc_data.Value
+
+                worst_qc_this_month = qc_series.copy()
+                worst_qc_this_month.index = worst_qc_this_month.index.map(
+                    lambda x: pd.Timestamp(year=x.year, month=x.month, day=1)
+                )
+                worst_qc_this_month = worst_qc_this_month.groupby(
+                    worst_qc_this_month.index
+                ).min()
+
+                monthly_qc = pd.concat(
+                    [
+                        worst_qc_this_month.reindex(data.Value.index, fill_value=1000),
+                        qc_series.reindex(data.Value.index, method="ffill"),
+                    ],
+                    axis=1,
+                ).min(axis=1)
+
+                data = data[monthly_qc > filter_quality]
+        except ValueError:
+            data = pd.Series()
+
+        return data, site_uses_backup
+
+
 def plot_site_supplement_pairs(main_site: str, filter_quality: int | None = 400):
     """Give plots and correlation values for rainfall."""
 

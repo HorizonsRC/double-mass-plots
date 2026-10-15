@@ -48,7 +48,7 @@ def monthly_sum(df):
     return monthly.iloc[1:-1]  # exclude partial months
 
 
-def generate_site_data(site: str, filter_quality: int | None):
+def generate_monthly_site_data(site: str, filter_quality: int | None):
     """
     Generates data for a site read for parsing as double mass plots.
 
@@ -63,9 +63,14 @@ def generate_site_data(site: str, filter_quality: int | None):
     """
     site_with_only_backup = False
     try:
-        data = ht.get_data(site, measurement, from_date=None, to_date=None).set_index(
-            ["Time"]
-        )
+        data = ht.get_data(
+            site,
+            measurement,
+            from_date=None,
+            to_date=None,
+            agg_method="Total",
+            agg_interval="1 month",
+        ).set_index(["Time"])
     except ValueError:
         # This catches missing sites
         # a missing measurement returns an empty df, so we do that
@@ -134,7 +139,7 @@ def title_sites_str(site1, site2, sites_using_backup):
 
 
 def plot_site_supplement_pairs(
-    main_site: str, supplementary_sites: [str], filter_quality: int | None = 400
+    main_site: str, supplementary_sites: list[str], filter_quality: int | None = 400
 ):
     """Give plots and correlation values for rainfall."""
 
@@ -145,12 +150,14 @@ def plot_site_supplement_pairs(
     sites_using_backup = []
     for site in [main_site] + supplementary_sites:
         print(f"Obtaining {site} data for comparison to {main_site}")
-        data, used_backup = generate_site_data(site=site, filter_quality=filter_quality)
+        data, used_backup = generate_monthly_site_data(
+            site=site, filter_quality=filter_quality
+        )
         if used_backup:
             sites_using_backup.append(site)
 
         if not data.empty:
-            monthly_data.append(monthly_sum(data.Value.rename(site)))
+            monthly_data.append(data.Value.rename(site))
         elif site == main_site:
             print("")
             print(f"No valid data for main site {site}")
@@ -199,7 +206,12 @@ def plot_site_supplement_pairs(
             plt.savefig(base_save_dir + f"{main_site}_fit_{site}.png", format="png")
             plt.close()
 
-    # plt.show()
+    with open(base_save_dir + "correlation_values.json", "w") as file:
+        file.write(json.dumps(dict(correlation_matrix.loc[main_site].drop(main_site))))
+    with open(base_save_dir + "scale_values.json", "w") as file:
+        file.write(json.dumps(scale_dict))
+    with open(base_save_dir + "backup_sites.json", "w") as file:
+        file.write(json.dumps(sites_using_backup))
     return (
         dict(correlation_matrix.loc[main_site].drop(main_site)),
         scale_dict,
@@ -295,28 +307,11 @@ def find_empty_sites():
     return backup_only_sites
 
 
-if __name__ == "__main__":
-    main_save_dir = f"./output/aa_stats/"
+def run_all_site_comparison():
     scales = {}
     correlations = {}
     backups = {}
-    site = "Lower Retaruke"
-    correlation, scale, backup = plot_site_supplement_pairs(
-        site,
-        [
-            "Whanganui at Te Porere",
-            "Whangamomona at Marco Road",
-            "Ruatiti at Ruatiti Station",
-            "Ohura at Ohura River Road",
-            "Makahiwi at Repeater",
-            "Air Quality at Taumarunui",
-        ],
-        filter_quality=400,
-    )
-    scales[site] = scale
-    correlations[site] = correlation
-    backups[site] = backup
-    """
+
     for site in get_site_list():
         correlation, scale, backup = plot_site_supplement_pairs(
             site, find_r_rain(site), filter_quality=400
@@ -324,7 +319,8 @@ if __name__ == "__main__":
         scales[site] = scale
         correlations[site] = correlation
         backups[site] = backup
-    """
+
+    main_save_dir = f"./output/aa_stats/"
     os.makedirs(main_save_dir, exist_ok=True)
     with open(main_save_dir + "correlation_values.json", "w") as file:
         file.write(json.dumps(correlations))
@@ -332,3 +328,24 @@ if __name__ == "__main__":
         file.write(json.dumps(scales))
     with open(main_save_dir + "backup_sites.json", "w") as file:
         file.write(json.dumps(backups))
+
+
+if __name__ == "__main__":
+    custom_run = False
+    if custom_run:
+        custom_main_site = "Whangamomona at Marco Road"
+        custom_supplementary_sites = [
+            "Whangamomona at Bridge to Somewhere",
+            "Ohura at Ohura River Road",
+            "Ruatiti at Ruatiti Station",
+            "Makahiwi at Repeater",
+            "Lower Retaruke",
+        ]
+
+        plot_site_supplement_pairs(
+            custom_main_site,
+            custom_supplementary_sites,
+            filter_quality=300,
+        )
+    else:
+        run_all_site_comparison()

@@ -12,10 +12,14 @@ It also generates a scale factor, which is used to adjust data between sites.
 For example, if the scale factor between Site A and Site B is 0.9, then to use site B data as synthetic data for
 site A, the site B data should be multiplied by 0.9 first.
 
+![Local Image](./readme_images/example_dmp.png)
+
 This tool also generates scatter plots which just compare the monthly totals for the two sites.
 This is useful for finding how well correlated the rainfall is between sites.
-This also generates the correlation coefficient (R), which represents how well correlated they are.
+This also generates the correlation coefficient (aka R or PCC), which represents how well correlated they are.
 The R values go from -1 to 1, with higher values indicating better correlation.
+
+![Local Image](./readme_images/example_scatter.png)
 
 ### What's the difference between correlation and linearity?
 
@@ -31,6 +35,10 @@ If there has been a significant change at one of the sites, this may show up as 
 When something like this occurs, you should consider rerunning the analysis for only the more relevant period
 (generally just looking at the data after the change causing the dog-leg shape). This will result in a more
 representative scaling factor. You could also consider using an alternative site.
+
+Below is an example of a slight dog leg - values up to approximately 5000 on the x axis show a higher gradient than
+values above 5000 on the "x" axis
+![Local Image](./readme_images/example_dogleg.png)
 
 The best available site from a given selection is generally the one with the higher R value.
 However, human judgement should be used to ensure this is the best selection.

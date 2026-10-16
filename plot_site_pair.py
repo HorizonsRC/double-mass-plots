@@ -35,6 +35,7 @@ excluded_sites = [
     "Wainui at Weber Intersection",
 ]
 
+# Measurements to try if there is no rainfall normally
 backup_measurements = [
     "Rainfall [SCADA Rainfall]",
     "Rainfall (backup) [SCADA Rainfall (backup)]",
@@ -43,82 +44,134 @@ backup_measurements = [
 
 
 def monthly_sum(df):
-    """Give monthly sums."""
+    """Deprecated - Calculates monthly sums."""
     monthly = df.groupby([lambda x: x.year, lambda x: x.month]).sum()
     return monthly.iloc[1:-1]  # exclude partial months
 
 
-def plot_site_supplement_pairs(main_site: str, filter_quality: int | None = 400):
-    """Give plots and correlation values for rainfall."""
+def generate_monthly_site_data(site: str, filter_quality: int | None):
+    """
+    Generates rainfall data for a site and filters it by quality code.
+
+    Parameters
+    ----------
+    site
+        The site to get the data for
+    filter_quality
+        Quality code for which data at or below should be removed from consideration
+
+    Returns
+    -------
+
+    """
+    site_with_only_backup = False
+    try:
+        data = ht.get_data(
+            site,
+            measurement,
+            from_date=None,
+            to_date=None,
+            agg_method="Total",
+            agg_interval="1 month",
+        ).set_index(["Time"])
+    except ValueError:
+        # This catches missing sites
+        # a missing measurement returns an empty df, so we do that
+        data = pd.DataFrame()
+
+    # check if we need to try for a backup datasource
+    if data.empty:
+        for meas in backup_measurements:
+            # Check again each loop so we stop when we've found it
+            if data.empty:
+                with suppress(ValueError):
+                    data = ht.get_data(
+                        site,
+                        meas,
+                        from_date=None,
+                        to_date=None,
+                        agg_method="Total",
+                        agg_interval="1 month",
+                    ).set_index(["Time"])
+                if not data.empty:
+                    site_with_only_backup = True
+
+    if filter_quality:
+        try:
+            qc_data = ht.get_data(
+                site,
+                measurement,
+                from_date=None,
+                to_date=None,
+                tstype="Quality",
+            ).set_index(["Time"])
+            if qc_data.empty:
+                data = pd.Series()
+            else:
+                qc_series = qc_data.Value
+
+                worst_qc_this_month = qc_series.copy()
+                worst_qc_this_month.index = worst_qc_this_month.index.map(
+                    lambda x: pd.Timestamp(year=x.year, month=x.month, day=1)
+                )
+                worst_qc_this_month = worst_qc_this_month.groupby(
+                    worst_qc_this_month.index
+                ).min()
+
+                monthly_qc = pd.concat(
+                    [
+                        worst_qc_this_month.reindex(data.Value.index, fill_value=1000),
+                        qc_series.reindex(data.Value.index, method="ffill"),
+                    ],
+                    axis=1,
+                ).min(axis=1)
+
+                data = data[monthly_qc > filter_quality]
+        except ValueError:
+            data = pd.Series()
+
+    return data, site_with_only_backup
+
+
+def title_sites_str(site1, site2, sites_using_backup):
+    """Tool for getting partial title for the plots."""
+    backup1 = site1 in sites_using_backup
+    if backup1:
+        backup1 = "BACKUP " + site1
+    else:
+        backup1 = site1
+    backup2 = site2 in sites_using_backup
+    if backup2:
+        backup2 = "BACKUP " + site2
+    else:
+        backup2 = site2
+    return backup1 + " vs " + backup2
+
+
+def plot_site_supplement_pairs(
+    main_site: str, supplementary_sites: list[str], filter_quality: int | None = 400
+):
+    """
+    Plot Double mass and correlation for rainfall.
+
+    Returns dicts containing correlation PCC values, scale factors, and whether backup was used
+    """
 
     base_save_dir = f"./output/{main_site}/"
     os.makedirs(base_save_dir, exist_ok=True)
-    supplementary_sites = find_r_rain(main_site)
 
     monthly_data = []
     sites_using_backup = []
     for site in [main_site] + supplementary_sites:
         print(f"Obtaining {site} data for comparison to {main_site}")
-        try:
-            data = ht.get_data(
-                site, measurement, from_date=None, to_date=None
-            ).set_index(["Time"])
-        except ValueError:
-            # This catches missing sites
-            # a missing measurement returns an empty df, so we do that
-            data = pd.DataFrame()
-
-        # check if we need to try for a backup datasource
-        if data.empty:
-            for meas in backup_measurements:
-                if meas == "Rainfall (backup) [SCADA Rainfall (backup)]":
-                    pass
-                if site not in sites_using_backup:
-                    with suppress(ValueError):
-                        data = ht.get_data(
-                            site, meas, from_date=None, to_date=None
-                        ).set_index(["Time"])
-                    if not data.empty:
-                        sites_using_backup.append(site)
-
-        if filter_quality and site not in sites_using_backup:
-            try:
-                qc_data = ht.get_data(
-                    site,
-                    measurement,
-                    from_date=None,
-                    to_date=None,
-                    tstype="Quality",
-                ).set_index(["Time"])
-                if qc_data.empty:
-                    data = pd.Series()
-                else:
-                    qc_series = qc_data.Value
-
-                    worst_qc_this_month = qc_series.copy()
-                    worst_qc_this_month.index = worst_qc_this_month.index.map(
-                        lambda x: pd.Timestamp(year=x.year, month=x.month, day=1)
-                    )
-                    worst_qc_this_month = worst_qc_this_month.groupby(
-                        worst_qc_this_month.index
-                    ).min()
-
-                    monthly_qc = pd.concat(
-                        [
-                            worst_qc_this_month.reindex(
-                                data.Value.index, fill_value=1000
-                            ),
-                            qc_series.reindex(data.Value.index, method="ffill"),
-                        ],
-                        axis=1,
-                    ).min(axis=1)
-
-                    data = data[monthly_qc > filter_quality]
-            except ValueError:
-                data = pd.Series()
+        data, used_backup = generate_monthly_site_data(
+            site=site, filter_quality=filter_quality
+        )
+        if used_backup:
+            sites_using_backup.append(site)
 
         if not data.empty:
-            monthly_data.append(monthly_sum(data.Value.rename(site)))
+            monthly_data.append(data.Value.rename(site))
         elif site == main_site:
             print("")
             print(f"No valid data for main site {site}")
@@ -131,24 +184,11 @@ def plot_site_supplement_pairs(main_site: str, filter_quality: int | None = 400)
 
     correlation_matrix = combined_df.corr()
 
-    def title_sites_str(site1, site2):
-        backup1 = site1 in sites_using_backup
-        if backup1:
-            backup1 = "BACKUP " + site1
-        else:
-            backup1 = site1
-        backup2 = site2 in sites_using_backup
-        if backup2:
-            backup2 = "BACKUP " + site2
-        else:
-            backup2 = site2
-        return backup1 + " vs " + backup2
-
     for site in supplementary_sites:
         plt.figure()
         plt.scatter(combined_df[main_site], combined_df[site])
         plt.title(
-            f"R2 {title_sites_str(main_site,site)}, PCC={correlation_matrix.loc[main_site, site]}"
+            f"R2 {title_sites_str(main_site, site, sites_using_backup)}, PCC={correlation_matrix.loc[main_site, site]}"
         )
         plt.savefig(base_save_dir + f"{main_site}_correlation_{site}.png", format="png")
         plt.close()
@@ -175,12 +215,17 @@ def plot_site_supplement_pairs(main_site: str, filter_quality: int | None = 400)
                 color="k",
             )
             plt.title(
-                f"DMP {title_sites_str(main_site,site)}, Scale={float(regression.coef_[0][0])}"
+                f"DMP {title_sites_str(main_site, site, sites_using_backup)}, Scale={float(regression.coef_[0][0])}"
             )
             plt.savefig(base_save_dir + f"{main_site}_fit_{site}.png", format="png")
             plt.close()
 
-    # plt.show()
+    with open(base_save_dir + "correlation_values.json", "w") as file:
+        file.write(json.dumps(dict(correlation_matrix.loc[main_site].drop(main_site))))
+    with open(base_save_dir + "scale_values.json", "w") as file:
+        file.write(json.dumps(scale_dict))
+    with open(base_save_dir + "backup_sites.json", "w") as file:
+        file.write(json.dumps(sites_using_backup))
     return (
         dict(correlation_matrix.loc[main_site].drop(main_site)),
         scale_dict,
@@ -258,6 +303,7 @@ def get_site_list():
 
 
 def find_empty_sites():
+    """Debug tool for finding sites that do not return values."""
     backup_only_sites = []
     for site in sorted(get_site_list()):
         print(site)
@@ -276,16 +322,21 @@ def find_empty_sites():
     return backup_only_sites
 
 
-if __name__ == "__main__":
-    main_save_dir = f"./output/aa_stats/"
+def run_all_site_comparison():
+    """Main function for running all found sites with their R_rain sites."""
     scales = {}
     correlations = {}
     backups = {}
-    for s in get_site_list():
-        correlation, scale, backup = plot_site_supplement_pairs(s, filter_quality=None)
-        scales[s] = scale
-        correlations[s] = correlation
-        backups[s] = backup
+
+    for site in get_site_list():
+        correlation, scale, backup = plot_site_supplement_pairs(
+            site, find_r_rain(site), filter_quality=400
+        )
+        scales[site] = scale
+        correlations[site] = correlation
+        backups[site] = backup
+
+    main_save_dir = f"./output/aa_stats/"
     os.makedirs(main_save_dir, exist_ok=True)
     with open(main_save_dir + "correlation_values.json", "w") as file:
         file.write(json.dumps(correlations))
@@ -293,3 +344,24 @@ if __name__ == "__main__":
         file.write(json.dumps(scales))
     with open(main_save_dir + "backup_sites.json", "w") as file:
         file.write(json.dumps(backups))
+
+
+if __name__ == "__main__":
+    custom_run = False
+    if custom_run:
+        custom_main_site = "Whangamomona at Marco Road"
+        custom_supplementary_sites = [
+            "Whangamomona at Bridge to Somewhere",
+            "Ohura at Ohura River Road",
+            "Ruatiti at Ruatiti Station",
+            "Makahiwi at Repeater",
+            "Lower Retaruke",
+        ]
+
+        plot_site_supplement_pairs(
+            custom_main_site,
+            custom_supplementary_sites,
+            filter_quality=300,
+        )
+    else:
+        run_all_site_comparison()

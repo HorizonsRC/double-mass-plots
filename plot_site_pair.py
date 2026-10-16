@@ -35,6 +35,7 @@ excluded_sites = [
     "Wainui at Weber Intersection",
 ]
 
+# Measurements to try if there is no rainfall normally
 backup_measurements = [
     "Rainfall [SCADA Rainfall]",
     "Rainfall (backup) [SCADA Rainfall (backup)]",
@@ -43,19 +44,21 @@ backup_measurements = [
 
 
 def monthly_sum(df):
-    """Give monthly sums."""
+    """Deprecated - Calculates monthly sums."""
     monthly = df.groupby([lambda x: x.year, lambda x: x.month]).sum()
     return monthly.iloc[1:-1]  # exclude partial months
 
 
 def generate_monthly_site_data(site: str, filter_quality: int | None):
     """
-    Generates data for a site read for parsing as double mass plots.
+    Generates rainfall data for a site and filters it by quality code.
 
     Parameters
     ----------
     site
+        The site to get the data for
     filter_quality
+        Quality code for which data at or below should be removed from consideration
 
     Returns
     -------
@@ -79,12 +82,19 @@ def generate_monthly_site_data(site: str, filter_quality: int | None):
     # check if we need to try for a backup datasource
     if data.empty:
         for meas in backup_measurements:
-            with suppress(ValueError):
-                data = ht.get_data(site, meas, from_date=None, to_date=None).set_index(
-                    ["Time"]
-                )
-            if not data.empty:
-                site_with_only_backup = True
+            # Check again each loop so we stop when we've found it
+            if data.empty:
+                with suppress(ValueError):
+                    data = ht.get_data(
+                        site,
+                        meas,
+                        from_date=None,
+                        to_date=None,
+                        agg_method="Total",
+                        agg_interval="1 month",
+                    ).set_index(["Time"])
+                if not data.empty:
+                    site_with_only_backup = True
 
     if filter_quality:
         try:
@@ -124,7 +134,7 @@ def generate_monthly_site_data(site: str, filter_quality: int | None):
 
 
 def title_sites_str(site1, site2, sites_using_backup):
-    """"""
+    """Tool for getting partial title for the plots."""
     backup1 = site1 in sites_using_backup
     if backup1:
         backup1 = "BACKUP " + site1
@@ -141,7 +151,11 @@ def title_sites_str(site1, site2, sites_using_backup):
 def plot_site_supplement_pairs(
     main_site: str, supplementary_sites: list[str], filter_quality: int | None = 400
 ):
-    """Give plots and correlation values for rainfall."""
+    """
+    Plot Double mass and correlation for rainfall.
+
+    Returns dicts containing correlation PCC values, scale factors, and whether backup was used
+    """
 
     base_save_dir = f"./output/{main_site}/"
     os.makedirs(base_save_dir, exist_ok=True)
@@ -289,6 +303,7 @@ def get_site_list():
 
 
 def find_empty_sites():
+    """Debug tool for finding sites that do not return values."""
     backup_only_sites = []
     for site in sorted(get_site_list()):
         print(site)
@@ -308,6 +323,7 @@ def find_empty_sites():
 
 
 def run_all_site_comparison():
+    """Main function for running all found sites with their R_rain sites."""
     scales = {}
     correlations = {}
     backups = {}
